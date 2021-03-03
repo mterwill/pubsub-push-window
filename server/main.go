@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -98,14 +100,29 @@ func main() {
 	port := flag.String("port", "8080", "")
 	limit := flag.Int64("limit", 5, "concurrent request limit")
 	sleep := flag.Int64("sleep", 500, "sleep duration ms")
+	block := flag.Bool("block", false, "fail fast if unable to acquire semaphore or block until it can be acquired")
 	flag.Parse()
 
 	stats := NewStats(fmt.Sprintf("%d concurrent requests %dms sleep", *limit, *sleep))
 	http.Handle("/stats", stats)
 
 	sem := semaphore.NewWeighted(*limit)
+	var semAcquire func(ctx context.Context) error
+	if *block {
+		semAcquire = func(ctx context.Context) error {
+			return sem.Acquire(ctx, 1)
+		}
+	} else {
+		semAcquire = func(ctx context.Context) error {
+			if sem.TryAcquire(1) {
+				return nil
+			}
+			return errors.New("failed to acquire semaphore")
+		}
+	}
+
 	http.Handle("/pubsub", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !sem.TryAcquire(1) {
+		if err := semAcquire(r.Context()); err != nil {
 			stats.Increment(statRateLimit)
 			http.Error(w, "concurrent request limit", http.StatusTooManyRequests)
 			return
